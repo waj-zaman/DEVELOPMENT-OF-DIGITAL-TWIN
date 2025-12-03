@@ -237,4 +237,289 @@ mkdir urdf
 
 **HERE WE FACED AN ERROR : The World was being created and visualized but the robot was not being spawned in the world.**
 
-- We will continue from here.
+- There was no robot added. We added the robot using the add button in rviz. 
+     Add --> RobotModel --> ok
+     In display panel --> Description_source = Topic --> Description Topic = /robot_description
+- Now the robot is spawned but there are two main errors.
+    1. No Tf Data. 
+    2. left_wheel --> No tansform from left_wheel to chassis
+        right_wheel --> No transform from right_wheel to chassis
+
+
+Here is a **clean, structured, markdown-formatted summary** that fits perfectly into your notes, following the same style and flow you are already using.
+I rewrote your debugging story into a clear *PHASE 3 – DEBUGGING THE ROBOT MODEL PIPELINE* section.
+
+You can paste this directly into your notes.
+
+---
+
+## PHASE 3 – DEBUGGING THE ROBOT MODEL PIPELINE (DETAILED SUMMARY)
+
+In this phase, we encountered several issues while launching the robot in RViz and resolved them step-by-step. This section documents **what went wrong**, **why it happened**, and **how we fixed it**, so the debugging workflow is easy to reference later.
+
+---
+
+### **ISSUE 1 — XACRO FILE NOT FOUND & XML PARSING ERROR**
+
+### **Symptoms:**
+
+* Launch failed with errors:
+
+  ```
+  FileNotFoundError: ...robot.xacro
+  AttributeError: module 'xml' has no attribute 'parsers'
+  ```
+* RViz launched, but robot was not visible.
+
+### **Root Cause:**
+
+The URDF/XACRO files existed only inside:
+
+```
+src/my_robot_description/my_robot_description/urdf/
+```
+
+but were **not installed** into the workspace:
+
+```
+install/my_robot_description/share/my_robot_description/urdf/
+```
+
+ROS2 launch uses the **installed** path, so it could not find `robot.xacro`.
+
+The XML error was only a secondary error caused by the missing file.
+
+---
+
+### **Fix Steps:**
+
+#### **1. Verified xacro file paths**
+
+```bash
+ls src/my_robot_description/my_robot_description/urdf
+ls install/my_robot_description/share/my_robot_description/urdf
+```
+
+Found: **files missing in install folder**.
+
+---
+
+#### **2. Inspected package metadata**
+
+* `setup.cfg` had correct `package_data`
+* BUT `setup.py` did **not** install the URDF files
+
+This caused colcon to build the files but not install them.
+
+---
+
+#### **3. Edited `setup.py` to install URDF files**
+
+Added:
+
+```python
+('share/' + package_name + '/urdf', [
+    'my_robot_description/urdf/robot.xacro',
+    'my_robot_description/urdf/robot.urdf',
+    'my_robot_description/urdf/test_robot.xacro'
+]),
+```
+
+---
+
+#### **4. Rebuilt workspace**
+
+```bash
+colcon build --packages-select my_robot_description
+source install/setup.bash
+```
+
+After rebuild, URDF appeared in install folder → **Issue 1 resolved.**
+
+---
+
+# ### **ISSUE 2 — RViz SHOWED ERRORS ABOUT MISSING TRANSFORMS**
+
+### **Symptoms in RViz:**
+
+```
+No transform from left_wheel to chassis
+No transform from right_wheel to chassis
+No TF data
+```
+
+### **TF tree inspection:**
+
+```bash
+ros2 run tf2_tools view_frames
+```
+
+Result:
+
+```
+frame_yaml='[]'
+```
+
+This confirmed: **No TF frames were being published.**
+
+---
+
+### **Root Cause:**
+
+`robot_state_publisher` only publishes transforms when:
+
+* URDF is loaded  ✔ (we confirmed this)
+* `/joint_states` topic is being published ❌ (NOT happening)
+
+Your robot has **continuous joints**:
+
+```xml
+type="continuous"
+```
+
+→ These require joint positions from `/joint_states`.
+
+No `joint_state_publisher` = **No TF → Robot not visible in RViz.**
+
+---
+
+# ### **Fix Steps:**
+
+### **1. Checked if joint_state_publisher was running**
+
+```bash
+ros2 node list
+```
+
+Result:
+
+```
+/robot_state_publisher
+/rviz
+```
+
+❌ No joint_state_publisher.
+
+---
+
+### **2. Verified package availability**
+
+```bash
+ros2 pkg executables joint_state_publisher
+ros2 pkg executables joint_state_publisher_gui
+```
+
+Result:
+
+```
+Package ... not found
+```
+
+These packages were **not installed**.
+
+---
+
+### **3. Installed missing packages**
+
+```bash
+sudo apt install ros-humble-joint-state-publisher ros-humble-joint-state-publisher-gui
+```
+
+---
+
+### **4. Updated launch file to start both publishers**
+
+Added:
+
+```python
+Node(
+    package='joint_state_publisher',
+    executable='joint_state_publisher',
+),
+
+Node(
+    package='joint_state_publisher_gui',
+    executable='joint_state_publisher_gui',
+),
+```
+
+Full pipeline:
+
+* `joint_state_publisher` → publishes joint angles
+* `robot_state_publisher` → publishes TF tree from URDF + joint states
+* `rviz2` → displays robot
+
+---
+
+### **5. Rebuilt & launched**
+
+```bash
+colcon build
+source install/setup.bash
+ros2 launch my_robot_description display_robot.launch.py
+```
+
+Ran:
+
+```bash
+ros2 node list
+```
+
+Now visible:
+
+```
+/joint_state_publisher
+/joint_state_publisher_gui
+```
+
+---
+
+### **6. Verified TF**
+
+```bash
+ros2 run tf2_tools view_frames
+```
+
+Now TF tree was populated:
+
+```
+chassis
+ ├── left_wheel
+ └── right_wheel
+```
+
+---
+
+# ### **FINAL RESULT**
+
+After fixing installation paths + launching joint_state_publisher:
+
+* Robot loads correctly in RViz
+* TF tree is fully populated
+* Continuous joints update in real-time
+* Wheel controller also launched successfully
+* No RViz transform errors
+* Entire ROS2 robot description pipeline working end-to-end
+
+---
+
+# ### ✔ LEARNINGS FROM THIS DEBUGGING SESSION
+
+1. **Xacro must be installed into install/share**, not just present in src.
+2. `setup.py`’s `data_files` controls installation of assets in ament_python packages.
+3. `robot_state_publisher` alone is not enough — it *requires* joint states.
+4. For continuous/revolute joints:
+
+   * You MUST run joint_state_publisher (or publish manually via /joint_states).
+5. TF debugging tools:
+
+   * `ros2 param get /robot_state_publisher robot_description`
+   * `ros2 run tf2_tools view_frames`
+   * `ros2 topic echo /joint_states --once`
+6. RViz errors almost always trace back to TF or missing robot_description.
+
+- Now when i run the command in the terminal as 
+```xml
+ros2 launch my_robot_controller digital_robot.launch.py
+```
+it runs fine
